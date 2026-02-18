@@ -2,6 +2,7 @@ import {
   CONTROL_MESSAGE,
   CONTROL_MESSAGES_MAP,
   MODELS_MAP,
+  RAGContextData,
   WSMessage,
   VERSIONS_MAP,
 } from "./types";
@@ -27,6 +28,11 @@ export const encodeMessage = (message: WSMessage): Uint8Array => {
       ]);
     case "error":
       return new Uint8Array([0x05, ...new TextEncoder().encode(message.data)]);
+    case "rag_context":
+      return new Uint8Array([
+        0x07,
+        ...new TextEncoder().encode(JSON.stringify(message.data)),
+      ]);
     case "ping":
       return new Uint8Array([0x06]);
   }
@@ -81,6 +87,13 @@ export const decodeMessage = (data: Uint8Array): WSMessage => {
       return {
         type: "ping",
       }
+    case 0x07: {
+      const ragData: RAGContextData = JSON.parse(new TextDecoder().decode(payload));
+      return {
+        type: "rag_context",
+        data: ragData,
+      }
+    }
     default: {
       console.log(type);
       throw new Error("Unknown message type");
