@@ -3,7 +3,8 @@ export type MessageType =
   | "audio"
   | "text"
   | "control"
-  | "metadata";
+  | "metadata"
+  | "rag_context";
 
 export const VERSIONS_MAP = {
   0: 0b00000000,
@@ -44,9 +45,19 @@ export type WSMessage =
     data: string;
   }
   | {
+    type: "rag_context";
+    data: RAGContextData;
+  }
+  | {
     type:"ping";
   }
 
+
+export type RAGContextData = {
+  content: string;
+  source: string;
+  query: string;
+};
 
 export type SocketStatus = "connected" | "disconnected" | "connecting";
 

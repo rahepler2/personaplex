@@ -14,5 +14,8 @@ from . import utils
 from . import modules
 from . import models
 from . import quantization
+from . import mcp_client
+from . import knowledge_base
+from . import mcp_config
 
 __version__ = "0.1.0"

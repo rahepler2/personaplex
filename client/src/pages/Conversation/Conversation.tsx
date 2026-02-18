@@ -7,6 +7,7 @@ import { Button } from "../../components/Button/Button";
 import { ServerAudioStats } from "./components/ServerAudio/ServerAudioStats";
 import { AudioStats } from "./hooks/useServerAudio";
 import { TextDisplay } from "./components/TextDisplay/TextDisplay";
+import { RAGContextDisplay } from "./components/RAGContext/RAGContext";
 import { MediaContext } from "./MediaContext";
 import { ServerInfo } from "./components/ServerInfo/ServerInfo";
 import { ModelParamsValues, useModelParams } from "./hooks/useModelParams";
@@ -277,6 +278,7 @@ export const Conversation:FC<ConversationProps> = ({
           </div>
           <div className="scrollbar player-text" ref={textContainerRef}>
             <TextDisplay containerRef={textContainerRef}/>
+            <RAGContextDisplay />
           </div>
           <div className="player-stats hidden md:block">
             <ServerAudioStats getAudioStats={getAudioStats} />

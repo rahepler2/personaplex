@@ -27,6 +27,7 @@
 import argparse
 import asyncio
 from dataclasses import dataclass
+import json
 import random
 import os
 from pathlib import Path
@@ -47,6 +48,9 @@ import random
 
 from .client_utils import make_log, colorize
 from .models import loaders, MimiModel, LMModel, LMGen
+from .mcp_client import MCPClient
+from .mcp_config import setup_mcp_and_rag, create_knowledge_base
+from .knowledge_base import KnowledgeBase, RAGConfig, RAGContext
 from .utils.connection import create_ssl_context, get_lan_ip
 from .utils.logging import setup_logger, ColorizedLog
 
@@ -96,7 +100,9 @@ class ServerState:
 
     def __init__(self, mimi: MimiModel, other_mimi: MimiModel, text_tokenizer: sentencepiece.SentencePieceProcessor,
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
-                 save_voice_prompt_embeddings: bool = False):
+                 save_voice_prompt_embeddings: bool = False,
+                 mcp_client: Optional[MCPClient] = None,
+                 rag_config: Optional[RAGConfig] = None):
         self.mimi = mimi
         self.other_mimi = other_mimi
         self.text_tokenizer = text_tokenizer
@@ -110,7 +116,9 @@ class ServerState:
                             frame_rate=self.mimi.frame_rate,
                             save_voice_prompt_embeddings=save_voice_prompt_embeddings,
         )
-        
+        self.mcp_client = mcp_client
+        self.rag_config = rag_config
+
         self.lock = asyncio.Lock()
         self.mimi.streaming_forever(1)
         self.other_mimi.streaming_forever(1)
@@ -144,7 +152,7 @@ class ServerState:
         # self.lm_gen.temp_text = float(request.query["text_temperature"])
         # self.lm_gen.top_k_text = max(1, int(request.query["text_topk"]))
         # self.lm_gen.top_k = max(1, int(request.query["audio_topk"]))
-        
+
         # Construct full voice prompt path
         requested_voice_prompt_path = None
         voice_prompt_path = None
@@ -160,14 +168,40 @@ class ServerState:
                 )
             else:
                 voice_prompt_path = requested_voice_prompt_path
-                
+
         if self.lm_gen.voice_prompt != voice_prompt_path:
             if voice_prompt_path.endswith('.pt'):
                 # Load pre-saved voice prompt embeddings
                 self.lm_gen.load_voice_prompt_embeddings(voice_prompt_path)
             else:
                 self.lm_gen.load_voice_prompt(voice_prompt_path)
-        self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(request.query["text_prompt"])) if len(request.query["text_prompt"]) > 0 else None
+
+        # --- RAG: Set up per-session knowledge base ---
+        text_prompt = request.query["text_prompt"]
+        knowledge_base = None
+
+        async def send_rag_context(context: RAGContext):
+            """Callback: send retrieved RAG context to the client."""
+            if not ws.closed:
+                payload = json.dumps({
+                    "content": context.content,
+                    "source": context.source,
+                    "query": context.query,
+                }).encode("utf8")
+                await ws.send_bytes(b"\x07" + payload)
+
+        if self.mcp_client is not None and self.rag_config is not None:
+            knowledge_base = create_knowledge_base(
+                self.mcp_client, self.rag_config, on_context=send_rag_context,
+            )
+            if knowledge_base is not None and len(text_prompt) > 0:
+                try:
+                    text_prompt = await knowledge_base.enrich_system_prompt(text_prompt)
+                    clog.log("info", "RAG: enriched system prompt with retrieved context")
+                except Exception as e:
+                    clog.log("error", f"RAG: failed to enrich system prompt: {e}")
+
+        self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(text_prompt)) if len(text_prompt) > 0 else None
         seed = int(request["seed"]) if "seed" in request.query else None
 
         async def recv_loop():
@@ -238,6 +272,9 @@ class ServerState:
                             _text = _text.replace("▁", " ")
                             msg = b"\x02" + bytes(_text, encoding="utf8")
                             await ws.send_bytes(msg)
+                            # Feed decoded agent text to RAG knowledge base
+                            if knowledge_base is not None:
+                                knowledge_base.add_text(_text, source="agent")
                         else:
                             text_token_map = ['EPAD', 'BOS', 'EOS', 'PAD']
 
@@ -255,6 +292,8 @@ class ServerState:
             clog.log("info", f"text prompt: {request.query['text_prompt']}")
         if len(request.query["voice_prompt"]) > 0:
             clog.log("info", f"voice prompt: {voice_prompt_path} (requested: {requested_voice_prompt_path})")
+        if knowledge_base is not None:
+            clog.log("info", "RAG knowledge base active for this session")
         close = False
         async with self.lock:
             if seed is not None and seed != -1:
@@ -305,6 +344,9 @@ class ServerState:
                 await ws.close()
                 clog.log("info", "session closed")
                 # await asyncio.gather(opus_loop(), recv_loop(), send_loop())
+        # Clean up knowledge base for this session
+        if knowledge_base is not None:
+            knowledge_base.reset()
         clog.log("info", "done with connection")
         return ws
 
@@ -390,6 +432,26 @@ def main():
             "that contains valid key.pem and cert.pem files"
         )
     )
+    parser.add_argument(
+        "--mcp-config",
+        type=str,
+        default=None,
+        help=(
+            "Path to MCP server configuration JSON file for RAG knowledge base. "
+            "If not provided, looks for MCP_CONFIG_PATH env var, "
+            "mcp_config.json, mcp.json, or .mcp/config.json in the working directory."
+        )
+    )
+    parser.add_argument(
+        "--no-rag",
+        action="store_true",
+        help="Disable RAG knowledge base even if MCP servers are configured."
+    )
+    parser.add_argument(
+        "--no-rag-enrich-prompt",
+        action="store_true",
+        help="Disable pre-fetching RAG context for the system prompt."
+    )
 
     args = parser.parse_args()
     args.voice_prompt_dir = _get_voice_prompt_dir(
@@ -445,6 +507,29 @@ def main():
     lm = loaders.get_moshi_lm(args.moshi_weight, device=args.device, cpu_offload=args.cpu_offload)
     lm.eval()
     logger.info("moshi loaded")
+
+    # --- Initialize MCP/RAG ---
+    mcp_client = None
+    rag_config = None
+    if not args.no_rag:
+        try:
+            loop = asyncio.new_event_loop()
+            mcp_client, rag_config = loop.run_until_complete(
+                setup_mcp_and_rag(
+                    mcp_config_path=args.mcp_config,
+                    rag_enabled=True,
+                    enrich_system_prompt=not args.no_rag_enrich_prompt,
+                )
+            )
+            loop.close()
+        except Exception as e:
+            logger.warning(f"MCP/RAG initialization failed (non-fatal): {e}")
+
+    if mcp_client is not None:
+        logger.info("RAG knowledge base enabled via MCP")
+    else:
+        logger.info("RAG knowledge base not configured (pass --mcp-config to enable)")
+
     state = ServerState(
         mimi=mimi,
         other_mimi=other_mimi,
@@ -453,11 +538,27 @@ def main():
         device=args.device,
         voice_prompt_dir=args.voice_prompt_dir,
         save_voice_prompt_embeddings=False,
+        mcp_client=mcp_client,
+        rag_config=rag_config,
     )
     logger.info("warming up the model")
     state.warmup()
     app = web.Application()
     app.router.add_get("/api/chat", state.handle_chat)
+
+    # RAG status endpoint
+    async def handle_rag_status(_request):
+        status = {
+            "enabled": mcp_client is not None and rag_config is not None,
+            "servers": mcp_client.connected_servers if mcp_client else [],
+            "tools": [
+                {"name": t.name, "server": t.server_name, "description": t.description}
+                for t in (mcp_client.available_tools if mcp_client else [])
+            ],
+        }
+        return web.json_response(status)
+
+    app.router.add_get("/api/rag/status", handle_rag_status)
     if static_path is not None:
         async def handle_root(_):
             return web.FileResponse(os.path.join(static_path, "index.html"))
