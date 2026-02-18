@@ -17,5 +17,7 @@ from . import quantization
 from . import mcp_client
 from . import knowledge_base
 from . import mcp_config
+from . import admin_store
+from . import admin_api
 
 __version__ = "0.1.0"

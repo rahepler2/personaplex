@@ -218,6 +218,96 @@ class MCPClient:
     def connected_servers(self) -> list[str]:
         return list(self._sessions.keys())
 
+    def server_status(self, name: str) -> dict:
+        """Get status info for a specific server."""
+        is_connected = name in self._sessions
+        tools = [t for t in self._tools.values() if t.server_name == name]
+        return {
+            "name": name,
+            "connected": is_connected,
+            "tools": [
+                {"name": t.name, "description": t.description}
+                for t in tools
+            ],
+        }
+
+    def all_server_statuses(self) -> list[dict]:
+        """Get status for all configured servers."""
+        all_names = set(self._servers.keys()) | set(self._sessions.keys())
+        return [self.server_status(name) for name in sorted(all_names)]
+
+    async def connect_server_by_name(self, name: str) -> dict:
+        """Connect (or reconnect) a single server by name. Returns status."""
+        config = self._servers.get(name)
+        if config is None:
+            return {"name": name, "connected": False, "error": "Server not configured"}
+        # Disconnect first if already connected
+        await self.disconnect_server(name)
+        try:
+            await self._connect_server(config)
+            self._running = True
+            return self.server_status(name)
+        except Exception as e:
+            logger.error(f"Failed to connect to {name}: {e}")
+            return {"name": name, "connected": False, "error": str(e)}
+
+    async def disconnect_server(self, name: str):
+        """Disconnect a single server."""
+        session = self._sessions.pop(name, None)
+        transport = self._transports.pop(name, None)
+        # Remove tools from this server
+        keys_to_remove = [k for k, t in self._tools.items() if t.server_name == name]
+        for k in keys_to_remove:
+            del self._tools[k]
+        if session:
+            try:
+                await session.__aexit__(None, None, None)
+            except Exception:
+                pass
+        if transport and hasattr(transport, '__aexit__'):
+            try:
+                await transport.__aexit__(None, None, None)
+            except Exception:
+                pass
+
+    async def remove_server(self, name: str):
+        """Remove a server entirely (disconnect + remove config)."""
+        await self.disconnect_server(name)
+        self._servers.pop(name, None)
+
+    async def test_connection(self, config: MCPServerConfig) -> dict:
+        """Test a connection to an MCP server without persisting it.
+
+        Returns dict with 'success', 'tools', and optionally 'error'.
+        """
+        try:
+            from mcp import ClientSession
+        except ImportError:
+            return {"success": False, "error": "MCP SDK not installed", "tools": []}
+
+        temp_name = f"__test_{config.name}"
+        temp_config = MCPServerConfig(
+            name=temp_name,
+            command=config.command or "",
+            args=config.args,
+            env=config.env,
+            transport=config.transport,
+            url=config.url,
+        )
+        try:
+            await self._connect_server(temp_config)
+            tools = [
+                {"name": t.name, "description": t.description}
+                for t in self._tools.values()
+                if t.server_name == temp_name
+            ]
+            # Clean up test connection
+            await self.disconnect_server(temp_name)
+            return {"success": True, "tools": tools}
+        except Exception as e:
+            await self.disconnect_server(temp_name)
+            return {"success": False, "error": str(e), "tools": []}
+
     async def disconnect_all(self):
         """Disconnect from all MCP servers."""
         for name, session in self._sessions.items():

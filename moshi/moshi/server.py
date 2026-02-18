@@ -48,9 +48,11 @@ import random
 
 from .client_utils import make_log, colorize
 from .models import loaders, MimiModel, LMModel, LMGen
-from .mcp_client import MCPClient
+from .mcp_client import MCPClient, MCPServerConfig
 from .mcp_config import setup_mcp_and_rag, create_knowledge_base
 from .knowledge_base import KnowledgeBase, RAGConfig, RAGContext
+from .admin_store import AdminStore
+from .admin_api import register_admin_routes
 from .utils.connection import create_ssl_context, get_lan_ip
 from .utils.logging import setup_logger, ColorizedLog
 
@@ -508,27 +510,62 @@ def main():
     lm.eval()
     logger.info("moshi loaded")
 
-    # --- Initialize MCP/RAG ---
-    mcp_client = None
+    # --- Initialize Admin Store ---
+    admin_store = AdminStore()
+    logger.info("Admin store initialized")
+
+    # --- Initialize MCP client and load saved servers ---
+    mcp_client = MCPClient()
     rag_config = None
+
     if not args.no_rag:
+        rag_config = RAGConfig(
+            enabled=True,
+            enrich_system_prompt=not args.no_rag_enrich_prompt,
+        )
+        # Load saved MCP servers from admin store
+        saved_servers = admin_store.list_mcp_servers()
+        for s in saved_servers:
+            if s.enabled:
+                config = MCPServerConfig(
+                    name=s.name,
+                    command=s.command or "",
+                    args=s.args,
+                    env=s.env,
+                    transport=s.transport,
+                    url=s.url,
+                )
+                mcp_client.add_server(config)
+
+        # Also load from config file if provided
+        if args.mcp_config:
+            try:
+                file_mcp_client, file_rag_config = asyncio.get_event_loop().run_until_complete(
+                    setup_mcp_and_rag(
+                        mcp_config_path=args.mcp_config,
+                        rag_enabled=True,
+                        enrich_system_prompt=not args.no_rag_enrich_prompt,
+                    )
+                )
+                if file_mcp_client:
+                    # Merge file-based servers into our client
+                    for name in file_mcp_client._servers:
+                        mcp_client.add_server(file_mcp_client._servers[name])
+            except Exception as e:
+                logger.warning(f"Config file MCP init failed (non-fatal): {e}")
+
+        # Connect all servers
         try:
             loop = asyncio.new_event_loop()
-            mcp_client, rag_config = loop.run_until_complete(
-                setup_mcp_and_rag(
-                    mcp_config_path=args.mcp_config,
-                    rag_enabled=True,
-                    enrich_system_prompt=not args.no_rag_enrich_prompt,
-                )
-            )
+            loop.run_until_complete(mcp_client.connect_all())
             loop.close()
         except Exception as e:
-            logger.warning(f"MCP/RAG initialization failed (non-fatal): {e}")
+            logger.warning(f"MCP connection failed (non-fatal): {e}")
 
-    if mcp_client is not None:
-        logger.info("RAG knowledge base enabled via MCP")
+    if mcp_client.is_connected:
+        logger.info(f"MCP connected: {mcp_client.connected_servers}")
     else:
-        logger.info("RAG knowledge base not configured (pass --mcp-config to enable)")
+        logger.info("No MCP servers connected (add via Admin UI or --mcp-config)")
 
     state = ServerState(
         mimi=mimi,
@@ -559,12 +596,22 @@ def main():
         return web.json_response(status)
 
     app.router.add_get("/api/rag/status", handle_rag_status)
+
+    # Register admin API routes
+    register_admin_routes(app, admin_store, mcp_client)
+
     if static_path is not None:
         async def handle_root(_):
             return web.FileResponse(os.path.join(static_path, "index.html"))
 
+        # SPA fallback: serve index.html for client-side routes
+        async def handle_spa_fallback(request):
+            return web.FileResponse(os.path.join(static_path, "index.html"))
+
         logger.info(f"serving static content from {static_path}")
         app.router.add_get("/", handle_root)
+        app.router.add_get("/admin", handle_spa_fallback)
+        app.router.add_get("/admin/{tail:.*}", handle_spa_fallback)
         app.router.add_static(
             "/", path=static_path, follow_symlinks=True, name="static"
         )
