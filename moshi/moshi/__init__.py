@@ -19,5 +19,6 @@ from . import knowledge_base
 from . import mcp_config
 from . import admin_store
 from . import admin_api
+from . import agent
 
 __version__ = "0.1.0"

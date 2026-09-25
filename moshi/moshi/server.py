@@ -53,6 +53,13 @@ from .mcp_config import setup_mcp_and_rag, create_knowledge_base
 from .knowledge_base import KnowledgeBase, RAGConfig, RAGContext
 from .admin_store import AdminStore
 from .admin_api import register_admin_routes
+from .agent import (
+    TranscriptProvider,
+    MockTranscriptProvider,
+    WhisperTranscriptProvider,
+    VoiceSession,
+    TurnConfig,
+)
 from .utils.connection import create_ssl_context, get_lan_ip
 from .utils.logging import setup_logger, ColorizedLog
 
@@ -104,7 +111,8 @@ class ServerState:
                  lm: LMModel, device: str | torch.device, voice_prompt_dir: str | None = None,
                  save_voice_prompt_embeddings: bool = False,
                  mcp_client: Optional[MCPClient] = None,
-                 rag_config: Optional[RAGConfig] = None):
+                 rag_config: Optional[RAGConfig] = None,
+                 transcript_provider_type: str = "none"):
         self.mimi = mimi
         self.other_mimi = other_mimi
         self.text_tokenizer = text_tokenizer
@@ -120,6 +128,7 @@ class ServerState:
         )
         self.mcp_client = mcp_client
         self.rag_config = rag_config
+        self.transcript_provider_type = transcript_provider_type
 
         self.lock = asyncio.Lock()
         self.mimi.streaming_forever(1)
@@ -203,6 +212,19 @@ class ServerState:
                 except Exception as e:
                     clog.log("error", f"RAG: failed to enrich system prompt: {e}")
 
+        # --- Transcript provider setup ---
+        transcript_provider: Optional[TranscriptProvider] = None
+        voice_session: Optional[VoiceSession] = None
+        if self.transcript_provider_type == "mock":
+            transcript_provider = MockTranscriptProvider(self.mimi.sample_rate)
+            clog.log("info", "Transcript: mock provider active")
+        elif self.transcript_provider_type == "whisper":
+            transcript_provider = WhisperTranscriptProvider(self.mimi.sample_rate)
+            clog.log("info", "Transcript: whisper provider active")
+
+        if transcript_provider is not None:
+            voice_session = VoiceSession(transcript_provider)
+
         self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(text_prompt)) if len(text_prompt) > 0 else None
         seed = int(request["seed"]) if "seed" in request.query else None
 
@@ -255,6 +277,8 @@ class ServerState:
                     be = time.time()
                     chunk = all_pcm_data[: self.frame_size]
                     all_pcm_data = all_pcm_data[self.frame_size:]
+                    if voice_session is not None:
+                        await voice_session.push_audio(chunk)
                     chunk = torch.from_numpy(chunk)
                     chunk = chunk.to(device=self.device)[None, None]
                     codes = self.mimi.encode(chunk)
@@ -288,6 +312,42 @@ class ServerState:
                 msg = opus_writer.read_bytes()
                 if len(msg) > 0:
                     await ws.send_bytes(b"\x01" + msg)
+
+        async def transcript_loop():
+            if voice_session is None:
+                return
+            try:
+                async for event in voice_session.run():
+                    if close or ws.closed:
+                        break
+                    payload = json.dumps({
+                        k: v for k, v in {
+                            "type": event.type,
+                            "segment_id": event.segment_id,
+                            "sequence": event.sequence,
+                            "text": event.text,
+                            "start_ms": event.start_ms,
+                            "end_ms": event.end_ms,
+                            "confidence": event.confidence,
+                            "language": event.language,
+                            "duration_ms": event.duration_ms,
+                            "provider": event.provider,
+                            "utterance_id": event.utterance_id,
+                            "segment_ids": event.segment_ids,
+                            "turn_id": event.turn_id,
+                        }.items() if v is not None
+                    }).encode("utf8")
+                    prefix = b"\x09" if event.type in (
+                        "user_transcript.final", "utterance.finalized",
+                        "turn.candidate", "turn.cancelled",
+                    ) else b"\x08"
+                    await ws.send_bytes(prefix + payload)
+                    if knowledge_base is not None and event.type == "user_transcript.final" and event.text:
+                        knowledge_base.add_text(event.text, source="user")
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                clog.log("error", f"transcript_loop error: {e}")
 
         clog.log("info", "accepted connection")
         if len(request.query["text_prompt"]) > 0:
@@ -334,6 +394,8 @@ class ServerState:
                     asyncio.create_task(opus_loop()),
                     asyncio.create_task(send_loop()),
                 ]
+                if voice_session is not None:
+                    tasks.append(asyncio.create_task(transcript_loop()))
 
                 done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 # Force-kill remaining tasks
@@ -346,6 +408,12 @@ class ServerState:
                 await ws.close()
                 clog.log("info", "session closed")
                 # await asyncio.gather(opus_loop(), recv_loop(), send_loop())
+        # Clean up voice session
+        if voice_session is not None:
+            try:
+                await voice_session.close()
+            except Exception:
+                pass
         # Clean up knowledge base for this session
         if knowledge_base is not None:
             knowledge_base.reset()
@@ -453,6 +521,13 @@ def main():
         "--no-rag-enrich-prompt",
         action="store_true",
         help="Disable pre-fetching RAG context for the system prompt."
+    )
+    parser.add_argument(
+        "--transcript-provider",
+        type=str,
+        default="none",
+        choices=["none", "mock", "whisper"],
+        help="ASR transcript provider: none (disabled), mock (energy-VAD placeholder), whisper (local Whisper)."
     )
 
     args = parser.parse_args()
@@ -577,6 +652,7 @@ def main():
         save_voice_prompt_embeddings=False,
         mcp_client=mcp_client,
         rag_config=rag_config,
+        transcript_provider_type=args.transcript_provider,
     )
     logger.info("warming up the model")
     state.warmup()
@@ -596,6 +672,15 @@ def main():
         return web.json_response(status)
 
     app.router.add_get("/api/rag/status", handle_rag_status)
+
+    # Transcript status endpoint
+    async def handle_transcript_status(_request):
+        return web.json_response({
+            "provider": args.transcript_provider,
+            "enabled": args.transcript_provider != "none",
+        })
+
+    app.router.add_get("/api/transcript/status", handle_transcript_status)
 
     # Register admin API routes
     register_admin_routes(app, admin_store, mcp_client)

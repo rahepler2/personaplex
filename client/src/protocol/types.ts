@@ -4,7 +4,8 @@ export type MessageType =
   | "text"
   | "control"
   | "metadata"
-  | "rag_context";
+  | "rag_context"
+  | "user_transcript";
 
 export const VERSIONS_MAP = {
   0: 0b00000000,
@@ -49,6 +50,10 @@ export type WSMessage =
     data: RAGContextData;
   }
   | {
+    type: "user_transcript";
+    data: UserTranscriptData;
+  }
+  | {
     type:"ping";
   }
 
@@ -57,6 +62,30 @@ export type RAGContextData = {
   content: string;
   source: string;
   query: string;
+};
+
+export type UserTranscriptData = {
+  type:
+    | "user_transcript.partial"
+    | "user_transcript.final"
+    | "speech.started"
+    | "speech.stopped"
+    | "utterance.updated"
+    | "utterance.finalized"
+    | "turn.candidate"
+    | "turn.cancelled";
+  segment_id?: string;
+  sequence?: number;
+  text?: string;
+  start_ms?: number | null;
+  end_ms?: number | null;
+  confidence?: number | null;
+  language?: string | null;
+  duration_ms?: number | null;
+  provider?: string;
+  utterance_id?: string;
+  segment_ids?: string[];
+  turn_id?: string;
 };
 
 export type SocketStatus = "connected" | "disconnected" | "connecting";

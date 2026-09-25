@@ -3,6 +3,7 @@ import {
   CONTROL_MESSAGES_MAP,
   MODELS_MAP,
   RAGContextData,
+  UserTranscriptData,
   WSMessage,
   VERSIONS_MAP,
 } from "./types";
@@ -92,6 +93,14 @@ export const decodeMessage = (data: Uint8Array): WSMessage => {
       return {
         type: "rag_context",
         data: ragData,
+      }
+    }
+    case 0x08:
+    case 0x09: {
+      const userTranscriptData: UserTranscriptData = JSON.parse(new TextDecoder().decode(payload));
+      return {
+        type: "user_transcript",
+        data: userTranscriptData,
       }
     }
     default: {
