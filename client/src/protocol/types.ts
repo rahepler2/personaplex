@@ -5,7 +5,8 @@ export type MessageType =
   | "control"
   | "metadata"
   | "rag_context"
-  | "user_transcript";
+  | "user_transcript"
+  | "orchestrator_event";
 
 export const VERSIONS_MAP = {
   0: 0b00000000,
@@ -54,9 +55,29 @@ export type WSMessage =
     data: UserTranscriptData;
   }
   | {
+    type: "orchestrator_event";
+    data: OrchestratorEventData;
+  }
+  | {
     type:"ping";
   }
 
+
+export type OrchestratorEventData = {
+  type: "tool_call" | "tool_result" | "sidecar_response" | "error";
+  turn_id?: string;
+  timestamp?: number;
+  data: {
+    tool?: string;
+    arguments?: Record<string, unknown>;
+    call_id?: string;
+    content?: string;
+    is_error?: boolean;
+    text?: string;
+    tool_calls_count?: number;
+    error?: string;
+  };
+};
 
 export type RAGContextData = {
   content: string;

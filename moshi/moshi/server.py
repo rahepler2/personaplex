@@ -60,6 +60,13 @@ from .agent import (
     VoiceSession,
     TurnConfig,
     EventController,
+    SidecarLLM,
+    SidecarConfig,
+    SidecarProvider,
+    ConversationOrchestrator,
+    OrchestratorConfig,
+    OrchestratorEvent,
+    AcceptedTurn,
 )
 from .utils.connection import create_ssl_context, get_lan_ip
 from .utils.logging import setup_logger, ColorizedLog
@@ -113,7 +120,8 @@ class ServerState:
                  save_voice_prompt_embeddings: bool = False,
                  mcp_client: Optional[MCPClient] = None,
                  rag_config: Optional[RAGConfig] = None,
-                 transcript_provider_type: str = "none"):
+                 transcript_provider_type: str = "none",
+                 sidecar_config: Optional[SidecarConfig] = None):
         self.mimi = mimi
         self.other_mimi = other_mimi
         self.text_tokenizer = text_tokenizer
@@ -130,6 +138,7 @@ class ServerState:
         self.mcp_client = mcp_client
         self.rag_config = rag_config
         self.transcript_provider_type = transcript_provider_type
+        self.sidecar_config = sidecar_config
 
         self.lock = asyncio.Lock()
         self.mimi.streaming_forever(1)
@@ -224,12 +233,40 @@ class ServerState:
             clog.log("info", "Transcript: whisper provider active")
 
         event_controller: Optional[EventController] = None
+        orchestrator: Optional[ConversationOrchestrator] = None
         if transcript_provider is not None:
             event_controller = EventController()
             voice_session = VoiceSession(
                 transcript_provider,
                 event_controller=event_controller,
             )
+
+        # --- Sidecar LLM + orchestrator setup ---
+        sidecar: Optional[SidecarLLM] = None
+        if self.sidecar_config is not None and self.sidecar_config.api_key:
+            sidecar = SidecarLLM(self.sidecar_config)
+
+            async def send_orchestrator_event(event: OrchestratorEvent):
+                """Callback: send orchestrator events to the client."""
+                if not ws.closed:
+                    payload = json.dumps({
+                        "type": event.type,
+                        "turn_id": event.turn_id,
+                        "timestamp": event.timestamp,
+                        "data": event.data,
+                    }).encode("utf8")
+                    await ws.send_bytes(b"\x0a" + payload)
+
+            orchestrator = ConversationOrchestrator(
+                sidecar=sidecar,
+                mcp_client=self.mcp_client,
+                knowledge_base=knowledge_base,
+                config=OrchestratorConfig(
+                    persona_prompt=text_prompt,
+                ),
+                on_event=send_orchestrator_event,
+            )
+            clog.log("info", f"Sidecar LLM active: {self.sidecar_config.provider.value}/{self.sidecar_config.model}")
 
         self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(text_prompt)) if len(text_prompt) > 0 else None
         seed = int(request["seed"]) if "seed" in request.query else None
@@ -355,6 +392,13 @@ class ServerState:
                         clog.log("info", f"Turn accepted: {event.turn_id} text={event.text[:80]!r}")
                         if knowledge_base is not None and event.text:
                             knowledge_base.add_text(event.text + ".", source="user")
+                        if orchestrator is not None and event.text:
+                            accepted = AcceptedTurn(
+                                turn_id=event.turn_id or "",
+                                text=event.text,
+                                timestamp=time.time(),
+                            )
+                            asyncio.create_task(orchestrator.process_turn(accepted))
             except asyncio.CancelledError:
                 pass
             except Exception as e:
@@ -423,6 +467,14 @@ class ServerState:
         if voice_session is not None:
             try:
                 await voice_session.close()
+            except Exception:
+                pass
+        # Clean up orchestrator and sidecar
+        if orchestrator is not None:
+            orchestrator.reset()
+        if sidecar is not None:
+            try:
+                await sidecar.close()
             except Exception:
                 pass
         # Clean up knowledge base for this session
@@ -540,6 +592,24 @@ def main():
         choices=["none", "mock", "whisper"],
         help="ASR transcript provider: none (disabled), mock (energy-VAD placeholder), whisper (local Whisper)."
     )
+    parser.add_argument(
+        "--sidecar-provider",
+        type=str,
+        default="anthropic",
+        choices=["anthropic", "openai"],
+        help="Sidecar LLM provider for tool calling. Requires ANTHROPIC_API_KEY or OPENAI_API_KEY env var."
+    )
+    parser.add_argument(
+        "--sidecar-model",
+        type=str,
+        default="",
+        help="Sidecar LLM model name (default: claude-sonnet-4-20250514 for Anthropic, gpt-4o for OpenAI)."
+    )
+    parser.add_argument(
+        "--no-sidecar",
+        action="store_true",
+        help="Disable the sidecar LLM for tool calling even if an API key is set."
+    )
 
     args = parser.parse_args()
     args.voice_prompt_dir = _get_voice_prompt_dir(
@@ -653,6 +723,25 @@ def main():
     else:
         logger.info("No MCP servers connected (add via Admin UI or --mcp-config)")
 
+    # --- Initialize sidecar LLM config ---
+    sidecar_config = None
+    if not args.no_sidecar:
+        provider = SidecarProvider(args.sidecar_provider)
+        sidecar_config = SidecarConfig(
+            provider=provider,
+            model=args.sidecar_model or "",
+        )
+        if sidecar_config.api_key:
+            logger.info(
+                f"Sidecar LLM configured: {sidecar_config.provider.value}/{sidecar_config.model}"
+            )
+        else:
+            env_var = "ANTHROPIC_API_KEY" if provider == SidecarProvider.ANTHROPIC else "OPENAI_API_KEY"
+            logger.info(
+                f"Sidecar LLM: no API key found (set {env_var} to enable tool calling)"
+            )
+            sidecar_config = None
+
     state = ServerState(
         mimi=mimi,
         other_mimi=other_mimi,
@@ -664,6 +753,7 @@ def main():
         mcp_client=mcp_client,
         rag_config=rag_config,
         transcript_provider_type=args.transcript_provider,
+        sidecar_config=sidecar_config,
     )
     logger.info("warming up the model")
     state.warmup()
@@ -692,6 +782,21 @@ def main():
         })
 
     app.router.add_get("/api/transcript/status", handle_transcript_status)
+
+    # Sidecar/orchestrator status endpoint
+    async def handle_sidecar_status(_request):
+        return web.json_response({
+            "enabled": sidecar_config is not None,
+            "provider": sidecar_config.provider.value if sidecar_config else None,
+            "model": sidecar_config.model if sidecar_config else None,
+            "tool_calling": sidecar_config is not None and mcp_client.is_connected,
+            "tools": [
+                {"name": t.name, "server": t.server_name, "description": t.description}
+                for t in (mcp_client.available_tools if mcp_client else [])
+            ],
+        })
+
+    app.router.add_get("/api/sidecar/status", handle_sidecar_status)
 
     # Register admin API routes
     register_admin_routes(app, admin_store, mcp_client)

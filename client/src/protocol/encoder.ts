@@ -2,6 +2,7 @@ import {
   CONTROL_MESSAGE,
   CONTROL_MESSAGES_MAP,
   MODELS_MAP,
+  OrchestratorEventData,
   RAGContextData,
   UserTranscriptData,
   WSMessage,
@@ -101,6 +102,13 @@ export const decodeMessage = (data: Uint8Array): WSMessage => {
       return {
         type: "user_transcript",
         data: userTranscriptData,
+      }
+    }
+    case 0x0a: {
+      const orchestratorData: OrchestratorEventData = JSON.parse(new TextDecoder().decode(payload));
+      return {
+        type: "orchestrator_event",
+        data: orchestratorData,
       }
     }
     default: {

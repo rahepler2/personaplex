@@ -5,6 +5,7 @@ Agent orchestration layer for PersonaPlex.
 Phase 1A: Pluggable ASR transcript capture
 Phase 1B: Utterance assembly and turn detection
 Phase 2:  Event controller (turn accept/reject decisions)
+Phase 3:  Sidecar LLM orchestrator (tool calling + RAG reasoning)
 """
 
 from .events import Event, EventBus, EventKind
@@ -18,6 +19,8 @@ from .utterance import UtteranceAssembler, UtteranceFragment, UtteranceUpdate, U
 from .turn_policy import TurnPolicy, TurnConfig, TurnCandidate
 from .event_controller import EventController, AcceptedTurn, TurnAcceptedCallback
 from .session import VoiceSession
+from .sidecar import SidecarLLM, SidecarConfig, SidecarProvider, SidecarResponse, ToolCall, ToolResult
+from .orchestrator import ConversationOrchestrator, OrchestratorConfig, OrchestratorEvent, OrchestratorCallback
 
 __all__ = [
     "Event",
@@ -38,4 +41,14 @@ __all__ = [
     "AcceptedTurn",
     "TurnAcceptedCallback",
     "VoiceSession",
+    "SidecarLLM",
+    "SidecarConfig",
+    "SidecarProvider",
+    "SidecarResponse",
+    "ToolCall",
+    "ToolResult",
+    "ConversationOrchestrator",
+    "OrchestratorConfig",
+    "OrchestratorEvent",
+    "OrchestratorCallback",
 ]
