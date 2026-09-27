@@ -16,6 +16,7 @@ class EventKind(Enum):
     SPEECH_STOPPED = auto()
     TRANSCRIPT_PARTIAL = auto()
     TRANSCRIPT_FINAL = auto()
+    TURN_ACCEPTED = auto()
     ERROR = auto()
 
 

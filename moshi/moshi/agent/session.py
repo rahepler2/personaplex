@@ -18,6 +18,7 @@ from .events import Event, EventBus, EventKind
 from .transcript import TranscriptEvent, TranscriptProvider
 from .utterance import UtteranceAssembler
 from .turn_policy import TurnPolicy, TurnConfig
+from .event_controller import EventController
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +42,13 @@ class VoiceSession:
         merge_gap: float = 1.5,
         turn_config: Optional[TurnConfig] = None,
         event_bus: Optional[EventBus] = None,
+        event_controller: Optional[EventController] = None,
     ):
         self.provider = provider
         self.assembler = UtteranceAssembler(merge_gap=merge_gap)
         self.turn_policy = TurnPolicy(config=turn_config)
         self.event_bus = event_bus
+        self.event_controller = event_controller
         self._closed = False
 
     async def push_audio(self, pcm: np.ndarray) -> None:
@@ -72,8 +75,12 @@ class VoiceSession:
                     await out.put(ae)
                     for pe in self.turn_policy.push(ae):
                         await out.put(pe)
+                        for ce in await self._push_controller(pe):
+                            await out.put(ce)
                 for pe in self.turn_policy.push(event):
                     await out.put(pe)
+                    for ce in await self._push_controller(pe):
+                        await out.put(ce)
 
         tick_task = asyncio.create_task(self._tick_loop(out))
         pump_task = asyncio.create_task(_provider_pump())
@@ -107,6 +114,24 @@ class VoiceSession:
             turn_event = self.turn_policy.tick()
             if turn_event is not None:
                 await out.put(turn_event)
+                for ce in await self._push_controller(turn_event):
+                    await out.put(ce)
+
+    async def _push_controller(self, event: TranscriptEvent) -> list[TranscriptEvent]:
+        """Feed a turn.candidate or turn.cancelled through the EventController."""
+        if self.event_controller is None:
+            return []
+        if event.type not in ("turn.candidate", "turn.cancelled"):
+            return []
+        results = await self.event_controller.push_async(event)
+        if self.event_bus:
+            for r in results:
+                if r.type == "turn.accepted":
+                    await self.event_bus.emit(Event(
+                        kind=EventKind.TURN_ACCEPTED,
+                        data={"text": r.text, "turn_id": r.turn_id},
+                    ))
+        return results
 
     async def close(self):
         """Shut down the session and flush pending state."""
@@ -115,6 +140,8 @@ class VoiceSession:
         if flush_event is not None:
             logger.info(f"Session flush: {flush_event.utterance_id}")
         self.turn_policy.reset()
+        if self.event_controller is not None:
+            self.event_controller.reset()
         await self.provider.close()
 
     async def _emit_bus_event(self, event: TranscriptEvent):

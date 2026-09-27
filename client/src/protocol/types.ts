@@ -73,7 +73,8 @@ export type UserTranscriptData = {
     | "utterance.updated"
     | "utterance.finalized"
     | "turn.candidate"
-    | "turn.cancelled";
+    | "turn.cancelled"
+    | "turn.accepted";
   segment_id?: string;
   sequence?: number;
   text?: string;

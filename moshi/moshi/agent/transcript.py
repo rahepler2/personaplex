@@ -31,7 +31,20 @@ class SessionPhase(Enum):
 
 @dataclass
 class TranscriptEvent:
-    """A single ASR event from a TranscriptProvider."""
+    """A single ASR event from a TranscriptProvider.
+
+    Known ``type`` values:
+
+    - ``speech.started``         -- VAD detected speech onset
+    - ``speech.stopped``         -- VAD detected speech offset
+    - ``user_transcript.partial``-- streaming partial transcript
+    - ``user_transcript.final``  -- finalized ASR segment
+    - ``utterance.updated``      -- assembler: utterance text updated
+    - ``utterance.finalized``    -- assembler: utterance complete
+    - ``turn.candidate``         -- policy: proposed conversational turn
+    - ``turn.cancelled``         -- policy: turn cancelled (new speech)
+    - ``turn.accepted``          -- controller: turn accepted for action
+    """
     type: str
     segment_id: Optional[str] = None
     sequence: Optional[int] = None
@@ -231,7 +244,7 @@ class MockTranscriptProvider(TranscriptProvider):
             "timestamp": time.time(),
             "session_id": self.session_id,
             "phase": "LISTENING" if not self.closed else "CLOSED",
-            "stats": len(self._queue) if self._queue else 0,
+            "stats": self._queue.qsize() if self._queue else 0,
             "speech_duration_ms": self._vad.speech_duration,
             "speech_active": self._vad.is_speaking,
         }

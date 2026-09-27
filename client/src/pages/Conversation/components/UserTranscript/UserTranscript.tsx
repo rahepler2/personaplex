@@ -16,39 +16,39 @@ export const UserTranscriptDisplay: FC = () => {
   }
 
   return (
-    <div className="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
+    <div className="mt-4 p-3 rounded-lg bg-base-200 border border-base-300">
       <div className="flex items-center gap-2 mb-2">
-        <span className="text-xs font-medium text-blue-700">
+        <span className="text-xs font-semibold text-primary">
           User Transcript
         </span>
         {isSpeaking && (
           <span className="flex items-center gap-1">
-            <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
-            <span className="text-xs text-red-600">Speaking</span>
+            <span className="w-2 h-2 bg-error rounded-full animate-pulse" />
+            <span className="text-xs text-error">Speaking</span>
           </span>
         )}
         {turnCandidate && (
-          <span className="text-xs text-green-600 font-medium">
+          <span className="text-xs text-success font-medium">
             Turn ready
           </span>
         )}
       </div>
       <div className="space-y-1">
         {transcripts.map((t, i) => (
-          <p key={`${t.segmentId ?? i}-${t.sequence ?? i}`} className="text-sm text-gray-800">
+          <p key={`${t.segmentId ?? i}-${t.sequence ?? i}`} className="text-sm">
             {t.text}
             {t.provider && (
-              <span className="ml-2 text-xs text-gray-400">[{t.provider}]</span>
+              <span className="ml-2 text-xs opacity-50">[{t.provider}]</span>
             )}
           </p>
         ))}
         {currentUtterance && (
-          <p className="text-sm text-blue-700 font-medium">
+          <p className="text-sm text-primary font-medium">
             {currentUtterance}
           </p>
         )}
         {partial && (
-          <p className="text-sm text-gray-500 italic">{partial.text}...</p>
+          <p className="text-sm opacity-60 italic">{partial.text}...</p>
         )}
       </div>
     </div>

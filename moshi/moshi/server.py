@@ -59,6 +59,7 @@ from .agent import (
     WhisperTranscriptProvider,
     VoiceSession,
     TurnConfig,
+    EventController,
 )
 from .utils.connection import create_ssl_context, get_lan_ip
 from .utils.logging import setup_logger, ColorizedLog
@@ -222,8 +223,13 @@ class ServerState:
             transcript_provider = WhisperTranscriptProvider(self.mimi.sample_rate)
             clog.log("info", "Transcript: whisper provider active")
 
+        event_controller: Optional[EventController] = None
         if transcript_provider is not None:
-            voice_session = VoiceSession(transcript_provider)
+            event_controller = EventController()
+            voice_session = VoiceSession(
+                transcript_provider,
+                event_controller=event_controller,
+            )
 
         self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(text_prompt)) if len(text_prompt) > 0 else None
         seed = int(request["seed"]) if "seed" in request.query else None
@@ -340,10 +346,15 @@ class ServerState:
                     prefix = b"\x09" if event.type in (
                         "user_transcript.final", "utterance.finalized",
                         "turn.candidate", "turn.cancelled",
+                        "turn.accepted",
                     ) else b"\x08"
                     await ws.send_bytes(prefix + payload)
                     if knowledge_base is not None and event.type == "user_transcript.final" and event.text:
                         knowledge_base.add_text(event.text, source="user")
+                    if event.type == "turn.accepted":
+                        clog.log("info", f"Turn accepted: {event.turn_id} text={event.text[:80]!r}")
+                        if knowledge_base is not None and event.text:
+                            knowledge_base.add_text(event.text + ".", source="user")
             except asyncio.CancelledError:
                 pass
             except Exception as e:

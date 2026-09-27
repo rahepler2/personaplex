@@ -101,6 +101,10 @@ export const useUserTranscript = () => {
       case "turn.cancelled":
         setTurnCandidate(null);
         break;
+
+      case "turn.accepted":
+        setTurnCandidate(null);
+        break;
     }
   }, []);
 
